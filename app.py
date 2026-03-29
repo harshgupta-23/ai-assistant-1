@@ -10,11 +10,13 @@ import google.genai as genai
 from google.genai import types
 from dotenv import load_dotenv
 
+load_dotenv()
+
 API_KEY = os.getenv("GEMINI_API")
 
 # --- Gemini Configuration ---
 # Replace with your actual API Key
-client = genai.Client(api_key=os.getenv(API_KEY))
+client = genai.Client(api_key=API_KEY)
 
 # The System Instruction defines the "Brain's" behavior
 def load_prompt(path="system_prompt.txt"):
@@ -46,10 +48,27 @@ class GeminiVoiceAssistant:
         self.root = root
         self.root.title("Gemini Context Assistant")
         self.root.geometry("450x600")
-        
-        # Initialize Chat Session (This holds the history)
-        self.chat = model.start_chat(history=[])
-        
+
+        # 1. Initialize the Client
+        # Ensure you have 'from google import genai' and 'from google.genai import types' at the top
+        self.client = genai.Client(api_key=os.getenv("GEMINI_API"))
+        self.model_id = MODEL_NAME # Upgraded to the 2026 standard
+
+        # 2. Define the behavior in a Config object
+        # This replaces the old generation_config and model-level instructions
+        self.chat_config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.0,
+            top_p=0.1,
+            top_k=1
+        )
+
+        # 3. Initialize Chat Session with the config
+        self.chat = self.client.chats.create(
+            model=self.model_id,
+            config=self.chat_config
+        )
+
         # Audio Setup
         self.p = pyaudio.PyAudio()
         self.is_recording = False
@@ -64,11 +83,11 @@ class GeminiVoiceAssistant:
 
         # Control Buttons
         self.btn = tk.Button(root, text="🎤 HOLD TO TALK", bg="#4CAF50", fg="white", 
-                             font=('Segoe UI', 10, 'bold'), width=30, height=2)
+                            font=('Segoe UI', 10, 'bold'), width=30, height=2)
         self.btn.pack(pady=5)
         
         self.reset_btn = tk.Button(root, text="🔄 NEW THREAD (Clear History)", 
-                                   command=self.reset_thread, bg="#f44336", fg="white")
+                                command=self.reset_thread, bg="#f44336", fg="white")
         self.reset_btn.pack(pady=10)
 
         # Bindings for Mouse Click
@@ -82,7 +101,9 @@ class GeminiVoiceAssistant:
         self.log.config(state='disabled')
 
     def reset_thread(self):
-        self.chat = model.start_chat(history=[]) # Reset the Gemini session
+        # 3. Reset the session by creating a new chat object
+        self.chat = self.client.chats.create(model=self.model_id)
+        
         self.log.config(state='normal')
         self.log.delete(1.0, tk.END)
         self.log.config(state='disabled')
