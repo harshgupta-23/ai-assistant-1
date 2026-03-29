@@ -1,0 +1,4 @@
+pyaudio
+SpeechRecognition
+google-genai
+python-dotenv
