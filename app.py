@@ -33,7 +33,7 @@ generation_config = types.GenerateContentConfig(
     system_instruction=SYSTEM_INSTRUCTION # System prompt goes here now
 )
 
-MODEL_NAME = 'gemini-2.5-flash'
+MODEL_NAME = 'gemini-2.0-flash'
 
 def get_chat_response(user_input):
     response = client.models.generate_content(
@@ -148,13 +148,13 @@ class GeminiVoiceAssistant:
             self.update_log("YOU", user_text)
 
             # Send to Gemini (The session tracks history automatically)
-            response = self.chat.send_message(user_text)
+            enforced_input = f"[EXECUTE THIS. OUTPUT ONLY --BEGIN-- BLOCKS. NO EXPLANATION. NO STEPS. NO METHODS.]\n{user_text}"
+            response = self.chat.send_message(enforced_input)
             response_text = response.text.strip()
 
             # Parse language and code
             blocks = self.parse_runnable_blocks(response_text)
             if blocks:
-                # Show any text outside blocks as AI message
                 clean_text = response_text
                 for b in blocks:
                     clean_text = clean_text.replace(b['raw'], '').strip()
@@ -162,7 +162,21 @@ class GeminiVoiceAssistant:
                     self.update_log("AI", clean_text)
                 self.root.after(0, self.show_review_window, blocks)
             else:
-                self.update_log("AI", response_text)
+                self.update_log("SYSTEM", "Bad format detected. Auto-retrying...")
+                correction = (
+                    "WRONG. DO NOT explain. DO NOT give steps. DO NOT give methods. "
+                    "DO NOT mention macOS. DO NOT use markdown. "
+                    "You are a code execution engine, not an assistant. "
+                    "Output ONLY --BEGIN-- blocks. Nothing else. No text outside blocks. "
+                    "Task: " + user_text
+                )
+                retry_response = self.chat.send_message(correction)
+                retry_text = retry_response.text.strip()
+                retry_blocks = self.parse_runnable_blocks(retry_text)
+                if retry_blocks:
+                    self.root.after(0, self.show_review_window, retry_blocks)
+                else:
+                    self.update_log("ERROR", "[RETRY ALSO FAILED] " + retry_text)
 
         except Exception as e:
             self.update_log("ERROR", str(e))
@@ -173,14 +187,14 @@ class GeminiVoiceAssistant:
     def parse_runnable_blocks(self, text):
         import re
         blocks = []
-        pattern = r'(<<<RUNNABLE>>>\s*LANG:\s*(\w+)\s*PRIORITY:\s*(\d+)\s*<<<CODE>>>(.*?)<<<END>>>)'
-        matches = re.findall(pattern, text, re.DOTALL)
-        for raw, lang, priority, code in matches:
+        pattern = r'(--BEGIN\s*:\s*(\w+)\s*:\s*(\d+)\s*--)(.*?)(--END--)'
+        matches = re.finditer(pattern, text, re.DOTALL)
+        for m in matches:
             blocks.append({
-                'raw': raw,
-                'lang': lang.strip().lower(),
-                'priority': int(priority.strip()),
-                'code': code.strip()
+                'raw': m.group(0),
+                'lang': m.group(2).strip().lower(),
+                'priority': int(m.group(3).strip()),
+                'code': m.group(4).strip()
             })
         blocks.sort(key=lambda x: x['priority'])
         return blocks
@@ -251,7 +265,7 @@ class GeminiVoiceAssistant:
 
         self.update_log("ERROR", "All blocks failed. No fallback remaining.")
     
-    
+
 if __name__ == "__main__":
     root = tk.Tk()
     app = GeminiVoiceAssistant(root)
