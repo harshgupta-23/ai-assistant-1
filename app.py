@@ -152,11 +152,15 @@ class GeminiVoiceAssistant:
             response_text = response.text.strip()
 
             # Parse language and code
-            if "CODE:" in response_text:
-                parts = response_text.split("CODE:", 1)
-                lang = parts[0].replace("LANGUAGE:", "").strip().lower()
-                code = parts[1].strip().replace("```", "") # Clean any backticks
-                self.root.after(0, self.show_review_window, lang, code)
+            blocks = self.parse_runnable_blocks(response_text)
+            if blocks:
+                # Show any text outside blocks as AI message
+                clean_text = response_text
+                for b in blocks:
+                    clean_text = clean_text.replace(b['raw'], '').strip()
+                if clean_text:
+                    self.update_log("AI", clean_text)
+                self.root.after(0, self.show_review_window, blocks)
             else:
                 self.update_log("AI", response_text)
 
@@ -166,50 +170,88 @@ class GeminiVoiceAssistant:
             self.btn.config(text="🎤 HOLD TO TALK")
             if os.path.exists(filename): os.remove(filename)
 
-    def show_review_window(self, lang, code):
+    def parse_runnable_blocks(self, text):
+        import re
+        blocks = []
+        pattern = r'(<<<RUNNABLE>>>\s*LANG:\s*(\w+)\s*PRIORITY:\s*(\d+)\s*<<<CODE>>>(.*?)<<<END>>>)'
+        matches = re.findall(pattern, text, re.DOTALL)
+        for raw, lang, priority, code in matches:
+            blocks.append({
+                'raw': raw,
+                'lang': lang.strip().lower(),
+                'priority': int(priority.strip()),
+                'code': code.strip()
+            })
+        blocks.sort(key=lambda x: x['priority'])
+        return blocks
+
+    def show_review_window(self, blocks):
         review = tk.Toplevel(self.root)
-        review.title(f"Review {lang.upper()} Script")
-        
-        lbl = tk.Label(review, text=f"Generated {lang} script. Confirm execution:", pady=5)
-        lbl.pack()
+        review.title("Review Scripts")
 
-        text_area = scrolledtext.ScrolledText(review, height=12, width=60, font=('Consolas', 9))
-        text_area.insert(tk.END, code)
-        text_area.pack(padx=10, pady=10)
-        
-        def run_script():
-            self.execute_script(lang, code)
+        tk.Label(review, text=f"{len(blocks)} block(s) found. PRIORITY 1 runs first, fallback on failure.", pady=5).pack()
+
+        notebook_frame = tk.Frame(review)
+        notebook_frame.pack(fill='both', expand=True, padx=10, pady=5)
+
+        text_areas = {}
+        for b in blocks:
+            lbl = tk.Label(notebook_frame, text=f"[PRIORITY {b['priority']}] {b['lang'].upper()}", anchor='w', font=('Consolas', 9, 'bold'))
+            lbl.pack(fill='x')
+            ta = scrolledtext.ScrolledText(notebook_frame, height=10, width=60, font=('Consolas', 9))
+            ta.insert(tk.END, b['code'])
+            ta.pack(pady=2)
+            text_areas[b['priority']] = (b['lang'], ta)
+
+        def run_scripts():
+            # Read edited code from text areas before closing
+            final_blocks = []
+            for priority, (lang, ta) in sorted(text_areas.items()):
+                final_blocks.append({'lang': lang, 'priority': priority, 'code': ta.get("1.0", tk.END).strip()})
             review.destroy()
+            threading.Thread(target=self.execute_with_fallback, args=(final_blocks,)).start()
 
-        exec_btn = tk.Button(review, text="EXECUTE", command=run_script, bg="green", fg="white", width=20)
-        exec_btn.pack(side=tk.LEFT, padx=20, pady=10)
-        
-        cancel_btn = tk.Button(review, text="CANCEL", command=review.destroy, width=20)
-        cancel_btn.pack(side=tk.RIGHT, padx=20, pady=10)
+        tk.Button(review, text="EXECUTE", command=run_scripts, bg="green", fg="white", width=20).pack(side=tk.LEFT, padx=20, pady=10)
+        tk.Button(review, text="CANCEL", command=review.destroy, width=20).pack(side=tk.RIGHT, padx=20, pady=10)
 
-    def execute_script(self, lang, code):
+    def execute_with_fallback(self, blocks):
         ext_map = {"powershell": ".ps1", "python": ".py", "batch": ".bat"}
-        ext = ext_map.get(lang, ".ps1")
-        temp_file = f"runner_task{ext}"
-        
-        with open(temp_file, "w") as f:
-            f.write(code)
+        for b in blocks:
+            lang = b['lang']
+            code = b['code']
+            ext = ext_map.get(lang, ".py")
+            temp_file = f"runner_task{ext}"
 
-        try:
-            if lang == "powershell":
-                # WindowStyle Hidden keeps the background clean
-                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", temp_file])
-            elif lang == "batch":
-                subprocess.run([temp_file], creationflags=subprocess.CREATE_NO_WINDOW)
-            else: # Python
-                subprocess.run(["python", temp_file])
-            
-            self.update_log("SYSTEM", f"Successfully executed {lang} task.")
-        except Exception as e:
-            self.update_log("SYSTEM ERROR", str(e))
-        finally:
-            if os.path.exists(temp_file): os.remove(temp_file)
+            with open(temp_file, "w") as f:
+                f.write(code)
 
+            try:
+                self.update_log("SYSTEM", f"Trying PRIORITY {b['priority']} ({lang.upper()})...")
+                if lang == "powershell":
+                    result = subprocess.run(
+                        ["powershell", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", temp_file],
+                        capture_output=True, text=True
+                    )
+                elif lang == "batch":
+                    result = subprocess.run([temp_file], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                else:
+                    result = subprocess.run(["python", temp_file], capture_output=True, text=True)
+
+                if result.returncode == 0:
+                    self.update_log("SYSTEM", f"[OK] PRIORITY {b['priority']} ({lang.upper()}) succeeded.")
+                    return  # Stop here, don't try fallback
+                else:
+                    self.update_log("WARN", f"PRIORITY {b['priority']} failed (code {result.returncode}): {result.stderr.strip()[:200]}")
+
+            except Exception as e:
+                self.update_log("WARN", f"PRIORITY {b['priority']} exception: {str(e)}")
+            finally:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+
+        self.update_log("ERROR", "All blocks failed. No fallback remaining.")
+    
+    
 if __name__ == "__main__":
     root = tk.Tk()
     app = GeminiVoiceAssistant(root)
